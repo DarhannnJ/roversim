@@ -232,8 +232,13 @@ void OccupancyGrid::integrate_scan(const Pose2& sensor, std::span<const Vec2> di
         if (flag == ray_flag::Settled) floor_count_[cell] = 0;
         if (mark_[cell] != hit_mark) {
             mark_[cell] = hit_mark;
+            // Запоминаются только попадания, которые подтверждают уже уверенно
+            // занятую клетку (оценка на верхней границе). У стены таких сотни; у
+            // объекта, проезжающего через клетку за несколько сканов, их почти
+            // нет, и его след на карте стирается без задержки.
+            const bool certain = log_odds_[cell] >= upper;
             log_odds_[cell] = std::min(upper, log_odds_[cell] + hit);
-            if (hit_count_[cell] < hit_memory) ++hit_count_[cell];
+            if (certain && hit_count_[cell] < hit_memory) ++hit_count_[cell];
         }
     }
 

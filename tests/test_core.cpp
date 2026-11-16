@@ -1607,6 +1607,15 @@ TEST(occupancy_grid_remembers_hits_against_misses) {
         CHECK(map.state(cx, cy) == (memory > 0 ? nav::CellState::Occupied : nav::CellState::Free));
         for (int k = 0; k < 40; ++k) map.integrate_scan(sensor, dirs, open, 10.0);
         CHECK(map.state(cx, cy) == nav::CellState::Free);
+
+        // Объект, пробывший в клетке всего несколько сканов (так выглядит проезжающее
+        // препятствие), памяти не оставляет: запоминаются только попадания в уже
+        // уверенно занятую клетку. Его след стирается так же быстро, как без памяти.
+        nav::OccupancyGrid passing(config, Vec2{0.0, 0.0});
+        for (int k = 0; k < 5; ++k) passing.integrate_scan(sensor, dirs, blocked, 10.0);
+        CHECK(passing.state(cx, cy) == nav::CellState::Occupied);
+        for (int k = 0; k < 11; ++k) passing.integrate_scan(sensor, dirs, open, 10.0);
+        CHECK(passing.state(cx, cy) == nav::CellState::Free);
     }
 }
 
