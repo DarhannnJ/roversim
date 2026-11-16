@@ -632,7 +632,9 @@ void bind_nav(py::module_& m) {
         .def_readwrite("free_threshold", &MapConfig::free_threshold)
         .def_readwrite("free_range", &MapConfig::free_range)
         .def_readwrite("surface_clearance", &MapConfig::surface_clearance)
-        .def_readwrite("floor_confirmations", &MapConfig::floor_confirmations);
+        .def_readwrite("floor_confirmations", &MapConfig::floor_confirmations)
+        .def_readwrite("hit_memory", &MapConfig::hit_memory,
+                       "сколько попаданий помнит клетка: наблюдение «свободно» сначала гасит одно из них (0 — выключено)");
 
     py::class_<SlamConfig>(nav, "SlamConfig", "Параметры сеточного SLAM.")
         .def(py::init<>())

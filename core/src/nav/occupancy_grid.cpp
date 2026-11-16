@@ -23,6 +23,7 @@ OccupancyGrid::OccupancyGrid(const MapConfig& config, Vec2 center) : cfg_(config
     const auto size = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
     log_odds_.assign(size, 0.0F);
     floor_count_.assign(size, 0);
+    hit_count_.assign(size, 0);
     mark_.assign(size, 0);
 }
 
@@ -96,6 +97,11 @@ bool OccupancyGrid::mark_free(int x, int y) noexcept {
     const std::uint32_t miss_mark = 2 * scan_id_;
     if (mark_[i] < miss_mark) {  // в этом скане клетку ещё не трогали
         mark_[i] = miss_mark;
+        // Память попаданий: наблюдение «свободно» сначала гасит одно прежнее попадание.
+        if (hit_count_[i] > 0) {
+            --hit_count_[i];
+            return true;
+        }
         log_odds_[i] = std::max(static_cast<float>(cfg_.log_odds_min), log_odds_[i] - static_cast<float>(cfg_.log_odds_miss));
         // Память о свободных наблюдениях: клетка, уверенно свободная несколько
         // сканов подряд, запоминается как «пол».
@@ -182,6 +188,7 @@ void OccupancyGrid::integrate_scan(const Pose2& sensor, std::span<const Vec2> di
     const std::uint32_t hit_mark = 2 * scan_id_ + 1;
     const float upper = static_cast<float>(cfg_.log_odds_max);
     const float hit = static_cast<float>(cfg_.log_odds_hit);
+    const auto hit_memory = static_cast<std::uint8_t>(std::clamp(cfg_.hit_memory, 0, 255));
     // Положение сенсора в единицах клеток (с дробной частью).
     const double sensor_x = (sensor.x - origin_.x) * inv_res, sensor_y = (sensor.y - origin_.y) * inv_res;
 
@@ -226,6 +233,7 @@ void OccupancyGrid::integrate_scan(const Pose2& sensor, std::span<const Vec2> di
         if (mark_[cell] != hit_mark) {
             mark_[cell] = hit_mark;
             log_odds_[cell] = std::min(upper, log_odds_[cell] + hit);
+            if (hit_count_[cell] < hit_memory) ++hit_count_[cell];
         }
     }
 

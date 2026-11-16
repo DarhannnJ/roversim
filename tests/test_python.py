@@ -279,7 +279,7 @@ def test_occupancy_mapping_and_planner_from_python():
     for _ in range(5):
         grid.integrate_scan(sim.pose, sim.lidar, scan)
     states = grid.states()
-    assert grid.log_odds.shape == states.shape == (320, 320) and not grid.log_odds.flags.writeable
+    assert grid.log_odds.shape == states.shape == (400, 400) and not grid.log_odds.flags.writeable   # 20 м по 5 см
     assert (states == 0).sum() > 500 and (states == 1).sum() > 50 and (states == 2).sum() > 50_000
     probability = grid.probability()
     assert probability.min() < 0.2 and probability.max() > 0.9
@@ -304,6 +304,12 @@ def test_navigation_agent_reaches_goal_with_slam():
     assert navigator.replans >= 1 and navigator.map.scans == sim.step_count
     image = rs.render_navigation(navigator, truth_pose=sim.pose)
     assert image.ndim == 3 and image.shape[2] == 3 and image.dtype == np.uint8
+    # Цель за пределами карты (20 × 20 м с центром в точке старта) — ошибка, а не вечное ожидание.
+    with pytest.raises(ValueError):
+        agent.set_goal(sim.pose[0] + 30.0, sim.pose[1])
+    # Настройки карты и трекера доступны из Python.
+    config = nav.navigator_config(rs.RobotParams(), 0.05)
+    assert config.slam.map.hit_memory == 200 and config.tracker.confirm_travel == 0.0 and config.startup_time == 0.0
 
 
 def test_dwa_planner_from_python():

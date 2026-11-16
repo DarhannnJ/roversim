@@ -43,6 +43,7 @@ struct Options {
     // Переопределения параметров навигатора — для сравнительных прогонов.
     std::optional<double> confirm_travel;
     std::optional<double> startup_time;
+    std::optional<int> hit_memory;
 };
 
 Options g_options;
@@ -56,6 +57,7 @@ void print_usage() {
         "  --confirm-travel X    tracker: displacement after which an object counts as moving, m\n"
         "                        (default 0: moving as soon as it is confirmed)\n"
         "  --startup-time X      navigator: observation pause after start, s (default 0)\n"
+        "  --hit-memory N        map: remembered hits per cell, 0 disables (default 200)\n"
         "  -h, --help            show this help");
 }
 
@@ -75,6 +77,8 @@ Options parse_options(int argc, char** argv) {
             opt.confirm_travel = std::stod(value());
         } else if (arg == "--startup-time") {
             opt.startup_time = std::stod(value());
+        } else if (arg == "--hit-memory") {
+            opt.hit_memory = std::stoi(value());
         } else if (arg == "-h" || arg == "--help") {
             print_usage();
             std::exit(0);
@@ -125,6 +129,7 @@ nav::NavigatorConfig default_navigator() {
     nav::NavigatorConfig nav_config = nav::navigator_config(config.robot, config.control_dt());
     if (g_options.confirm_travel) nav_config.tracker.confirm_travel = *g_options.confirm_travel;
     if (g_options.startup_time) nav_config.startup_time = *g_options.startup_time;
+    if (g_options.hit_memory) nav_config.slam.map.hit_memory = *g_options.hit_memory;
     return nav_config;
 }
 
@@ -609,6 +614,7 @@ int main(int argc, char** argv) {
         std::puts("roversim navigation benchmark: lidar 360 rays, sensor noise on, map and true pose unknown to the robot");
         if (opt.confirm_travel) std::printf("override: tracker.confirm_travel = %g m\n", *opt.confirm_travel);
         if (opt.startup_time) std::printf("override: startup_time = %g s\n", *opt.startup_time);
+        if (opt.hit_memory) std::printf("override: slam.map.hit_memory = %d\n", *opt.hit_memory);
         if (opt.only == "all" || opt.only == "static") bench_static(opt.episodes);
         if (opt.only == "all" || opt.only == "dynamic") bench_dynamic(opt.episodes);
         if (opt.only == "all" || opt.only == "timing") bench_timing(opt.episodes);
