@@ -1,0 +1,31 @@
+# Сборка Python-пакета: `pip install .` из корня проекта.
+# scikit-build-core запускает CMake, собирает модуль _core и кладёт его в пакет roversim.
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "roversim"
+version = "0.1.0"
+description = "Лёгкий детерминированный симулятор ровера с дифференциальным приводом: физика, сенсоры, SLAM, навигация, среда для RL"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+gym = ["gymnasium>=0.29"]           # среда RoverEnv
+rl = ["gymnasium>=0.29", "torch"]   # обучение PPO (каталог rl/)
+viz = ["pillow"]                    # сохранение кадров в примерах
+test = ["pytest", "gymnasium>=0.29"]
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+wheel.packages = ["python/roversim"]
+
+[tool.scikit-build.cmake.define]
+ROVERSIM_BUILD_APPS = "OFF"
+ROVERSIM_BUILD_TESTS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

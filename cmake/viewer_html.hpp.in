@@ -1,0 +1,8 @@
+// Сгенерировано CMake из web/viewer.html — не редактировать, править исходную страницу.
+#pragma once
+
+namespace roversim::viz {
+
+inline constexpr char kViewerHtml[] = R"RSVIEW(@ROVERSIM_VIEWER_HTML@)RSVIEW";
+
+}  // namespace roversim::viz

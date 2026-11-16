@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>roversim</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d11; color: #d7dce5; overflow: hidden;
+               font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .panel { position: absolute; left: 12px; padding: 10px 12px; background: rgba(15, 18, 24, 0.84);
+           border: 1px solid #262b36; border-radius: 8px; pointer-events: none;
+           box-sizing: border-box; max-width: calc(100% - 24px); }
+  #hud { top: 12px; min-width: 220px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 18px; }
+  #hud .key { color: #8a93a6; }
+  #hud .val { color: #ffffff; font-variant-numeric: tabular-nums; }
+  #status { margin-bottom: 6px; }
+  #dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: #c0392b; }
+  #dot.on { background: #2ecc71; }
+  .tag { display: inline-block; padding: 0 7px; margin-left: 6px; border-radius: 4px; color: #0b0d11; font-weight: 600; }
+  #legend { bottom: 12px; color: #8a93a6; }
+  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 5px 0 12px; vertical-align: -1px; }
+  #legend i:first-child { margin-left: 0; }
+  kbd { padding: 0 5px; border: 1px solid #3a4150; border-radius: 4px; color: #d7dce5; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud" class="panel">
+  <div id="status"><span id="dot"></span><span id="conn">нет связи</span><span id="tags"></span></div>
+  <div class="row"><span class="key">время</span><span class="val" id="time">–</span></div>
+  <div class="row"><span class="key">эпизод / шаг</span><span class="val" id="step">–</span></div>
+  <div class="row"><span class="key">скорость</span><span class="val" id="speed">–</span></div>
+  <div class="row"><span class="key">до цели</span><span class="val" id="goal">–</span></div>
+  <div class="row"><span class="key">дрейф одометрии</span><span class="val" id="drift">–</span></div>
+  <div class="row"><span class="key">награда</span><span class="val" id="reward">–</span></div>
+  <div class="row"><span class="key">кадров/с</span><span class="val" id="fps">–</span></div>
+</div>
+<div id="legend" class="panel">
+  <i style="background:#4287f5"></i>робот
+  <i style="background:#ff8c00"></i>одометрия
+  <i style="background:#40c878"></i>лидар
+  <i style="background:#fac828"></i>цель
+  <i style="background:#ba68c8"></i>подвижные препятствия
+  &nbsp;·&nbsp; <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> или стрелки — ручное управление
+</div>
+<script>
+(() => {
+  'use strict';
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d');
+  const el = (id) => document.getElementById(id);
+
+  let world = null;     // карта: размеры, препятствия, готовая картинка сетки
+  let frame = null;     // последний кадр состояния
+  let trail = [];       // пройденный путь в текущем эпизоде
+  let trailEpisode = -1;
+  let socket = null;
+  let drawPending = false;
+  let frameCount = 0;
+
+  // ---- Разбор сообщений (формат описан в core/src/viz_web.cpp) ----
+
+  function readWorld(view, buffer) {
+    const w = view.getUint32(4, true), h = view.getUint32(8, true);
+    const boxCount = view.getUint32(24, true), circleCount = view.getUint32(28, true);
+    let offset = 32;
+    const boxes = new Float32Array(buffer, offset, boxCount * 4); offset += boxCount * 16;
+    const circles = new Float32Array(buffer, offset, circleCount * 3); offset += circleCount * 12;
+    const cells = new Uint8Array(buffer, offset, w * h);
+
+    // Сетка рисуется один раз в отдельный холст: один пиксель на клетку.
+    const image = document.createElement('canvas');
+    image.width = w; image.height = h;
+    const imageCtx = image.getContext('2d');
+    const pixels = imageCtx.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) {
+      const wall = cells[i] !== 0;
+      pixels.data[4 * i] = wall ? 196 : 24;
+      pixels.data[4 * i + 1] = wall ? 202 : 27;
+      pixels.data[4 * i + 2] = wall ? 212 : 34;
+      pixels.data[4 * i + 3] = 255;
+    }
+    imageCtx.putImageData(pixels, 0, 0);
+    world = { w, h, cell: view.getFloat32(12, true), ox: view.getFloat32(16, true), oy: view.getFloat32(20, true),
+              boxes, circles, image };
+    trail = [];
+  }
+
+  function readFrame(view, buffer) {
+    const f = (offset) => view.getFloat32(offset, true);
+    const flags = view.getUint8(1);
+    frame = {
+      collision: (flags & 1) !== 0, success: (flags & 2) !== 0,
+      terminated: (flags & 4) !== 0, truncated: (flags & 8) !== 0,
+      step: view.getUint32(8, true), episode: view.getUint32(12, true),
+      time: f(16), x: f(20), y: f(24), theta: f(28), goalX: f(32), goalY: f(36),
+      odomX: f(40), odomY: f(44), odomTheta: f(48), v: f(52), w: f(56), radius: f(60),
+      lidarX: f(64), lidarY: f(68), lidarYaw: f(72), angleMin: f(76), angleInc: f(80), rangeMax: f(84),
+      reward: f(88), goalRadius: f(92),
+      ranges: new Float32Array(buffer, 96, view.getUint32(4, true)),
+    };
+    // После дальностей идут подвижные препятствия: по пять чисел (x, y, радиус, vx, vy).
+    const tail = 96 + 4 * frame.ranges.length;
+    frame.obstacles = new Float32Array(buffer, tail + 4, view.getUint32(tail, true) * 5);
+    if (frame.episode !== trailEpisode) { trail = []; trailEpisode = frame.episode; }
+    const last = trail[trail.length - 1];
+    if (!last || Math.hypot(frame.x - last[0], frame.y - last[1]) > 0.02) trail.push([frame.x, frame.y]);
+    frameCount++;
+  }
+
+  // ---- Отрисовка ----
+
+  function requestDraw() {
+    if (drawPending) return;
+    drawPending = true;
+    requestAnimationFrame(() => { drawPending = false; draw(); });
+  }
+
+  function draw() {
+    const W = canvas.width, H = canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0b0d11';
+    ctx.fillRect(0, 0, W, H);
+    if (!world) return;
+
+    // Мир вписывается в свободную от панелей область окна: в широком окне — справа
+    // от панели состояния, в узком — под ней; снизу остаётся место для легенды.
+    // Дальше рисуем в метрах, ось Y направлена вверх.
+    const worldW = world.w * world.cell, worldH = world.h * world.cell;
+    const dpr = window.devicePixelRatio || 1;
+    const wide = W > 1.25 * H;
+    const left = (wide ? 290 : 20) * dpr, right = 20 * dpr;
+    const top = (wide ? 20 : 205) * dpr, bottom = (wide ? 64 : 112) * dpr;
+    const scale = Math.max(1e-6, Math.min((W - left - right) / worldW, (H - top - bottom) / worldH));
+    const originX = left + (W - left - right - worldW * scale) / 2;
+    const originY = top + (H - top - bottom - worldH * scale) / 2;
+    ctx.setTransform(scale, 0, 0, -scale, originX - world.ox * scale, originY + worldH * scale + world.oy * scale);
+    const px = 1 / scale;  // один экранный пиксель в метрах
+
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(world.image, world.ox, world.oy, worldW, worldH);
+    ctx.fillStyle = '#c4cad4';
+    for (let i = 0; i < world.boxes.length; i += 4) {
+      ctx.fillRect(world.boxes[i], world.boxes[i + 1], world.boxes[i + 2] - world.boxes[i], world.boxes[i + 3] - world.boxes[i + 1]);
+    }
+    for (let i = 0; i < world.circles.length; i += 3) {
+      ctx.beginPath();
+      ctx.arc(world.circles[i], world.circles[i + 1], world.circles[i + 2], 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    if (!frame) return;
+    const s = frame;
+
+    // Лучи лидара и точки отражений.
+    ctx.lineWidth = px;
+    ctx.strokeStyle = 'rgba(64, 200, 120, 0.20)';
+    ctx.beginPath();
+    for (let i = 0; i < s.ranges.length; i++) {
+      const a = s.lidarYaw + s.angleMin + i * s.angleInc;
+      ctx.moveTo(s.lidarX, s.lidarY);
+      ctx.lineTo(s.lidarX + Math.cos(a) * s.ranges[i], s.lidarY + Math.sin(a) * s.ranges[i]);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#ff6050';
+    for (let i = 0; i < s.ranges.length; i++) {
+      if (s.ranges[i] >= s.rangeMax - 1e-3) continue;
+      const a = s.lidarYaw + s.angleMin + i * s.angleInc;
+      ctx.fillRect(s.lidarX + Math.cos(a) * s.ranges[i] - 1.5 * px, s.lidarY + Math.sin(a) * s.ranges[i] - 1.5 * px, 3 * px, 3 * px);
+    }
+
+    // Пройденный путь.
+    if (trail.length > 1) {
+      ctx.strokeStyle = 'rgba(120, 160, 255, 0.9)';
+      ctx.lineWidth = 2 * px;
+      ctx.beginPath();
+      ctx.moveTo(trail[0][0], trail[0][1]);
+      for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i][0], trail[i][1]);
+      ctx.stroke();
+    }
+
+    // Подвижные препятствия и направление их движения (путь за полсекунды).
+    for (let i = 0; i < s.obstacles.length; i += 5) {
+      const ox = s.obstacles[i], oy = s.obstacles[i + 1];
+      ctx.fillStyle = '#ba68c8';
+      ctx.beginPath(); ctx.arc(ox, oy, s.obstacles[i + 2], 0, 2 * Math.PI); ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5 * px;
+      ctx.beginPath(); ctx.moveTo(ox, oy);
+      ctx.lineTo(ox + 0.5 * s.obstacles[i + 3], oy + 0.5 * s.obstacles[i + 4]);
+      ctx.stroke();
+    }
+
+    // Цель: окружность радиуса достижения.
+    ctx.strokeStyle = '#fac828';
+    ctx.fillStyle = '#fac828';
+    ctx.lineWidth = 2 * px;
+    ctx.beginPath(); ctx.arc(s.goalX, s.goalY, s.goalRadius, 0, 2 * Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.arc(s.goalX, s.goalY, 3 * px, 0, 2 * Math.PI); ctx.fill();
+
+    // Поза по одометрии — контуром: расхождение с роботом и есть дрейф.
+    ctx.strokeStyle = '#ff8c00';
+    ctx.lineWidth = 1.5 * px;
+    ctx.beginPath(); ctx.arc(s.odomX, s.odomY, s.radius, 0, 2 * Math.PI);
+    ctx.moveTo(s.odomX, s.odomY);
+    ctx.lineTo(s.odomX + Math.cos(s.odomTheta) * s.radius, s.odomY + Math.sin(s.odomTheta) * s.radius);
+    ctx.stroke();
+
+    // Робот.
+    ctx.fillStyle = s.collision ? '#eb463c' : '#4287f5';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.radius, 0, 2 * Math.PI); ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2 * px;
+    ctx.beginPath(); ctx.moveTo(s.x, s.y);
+    ctx.lineTo(s.x + Math.cos(s.theta) * s.radius, s.y + Math.sin(s.theta) * s.radius);
+    ctx.stroke();
+  }
+
+  function updateHud() {
+    if (!frame) return;
+    const s = frame;
+    el('time').textContent = s.time.toFixed(2) + ' с';
+    el('step').textContent = s.episode + ' / ' + s.step;
+    el('speed').textContent = s.v.toFixed(2) + ' м/с  ' + s.w.toFixed(2) + ' рад/с';
+    el('goal').textContent = Math.hypot(s.goalX - s.x, s.goalY - s.y).toFixed(2) + ' м';
+    el('drift').textContent = (100 * Math.hypot(s.odomX - s.x, s.odomY - s.y)).toFixed(1) + ' см';
+    el('reward').textContent = s.reward.toFixed(3);
+    const tags = [];
+    if (s.collision) tags.push(['столкновение', '#eb463c']);
+    if (s.success) tags.push(['цель', '#2ecc71']);
+    if (s.truncated) tags.push(['лимит шагов', '#fac828']);
+    el('tags').innerHTML = tags.map(([text, color]) => '<span class="tag" style="background:' + color + '">' + text + '</span>').join('');
+  }
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    draw();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  setInterval(() => { el('fps').textContent = String(frameCount); frameCount = 0; }, 1000);
+
+  // ---- Соединение: при обрыве переподключаемся сами ----
+
+  function connect() {
+    socket = new WebSocket('ws://' + location.host + '/ws');
+    socket.binaryType = 'arraybuffer';
+    socket.onopen = () => { el('dot').className = 'on'; el('conn').textContent = 'подключено'; };
+    socket.onclose = () => {
+      el('dot').className = ''; el('conn').textContent = 'нет связи';
+      setTimeout(connect, 1000);
+    };
+    socket.onmessage = (event) => {
+      const view = new DataView(event.data);
+      const type = view.getUint8(0);
+      if (type === 1) readWorld(view, event.data);
+      else if (type === 2) { readFrame(view, event.data); updateHud(); }
+      requestDraw();
+    };
+  }
+  connect();
+
+  // ---- Ручное управление: пока клавиши нажаты, 20 раз в секунду шлём (v, w) ----
+
+  const KEYS = { KeyW: [1, 0], ArrowUp: [1, 0], KeyS: [-1, 0], ArrowDown: [-1, 0],
+                 KeyA: [0, 1], ArrowLeft: [0, 1], KeyD: [0, -1], ArrowRight: [0, -1] };
+  const pressed = new Set();
+  let driving = false;
+  window.addEventListener('keydown', (event) => { if (KEYS[event.code]) { pressed.add(event.code); event.preventDefault(); } });
+  window.addEventListener('keyup', (event) => pressed.delete(event.code));
+  window.addEventListener('blur', () => pressed.clear());
+  setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    let v = 0, w = 0;
+    for (const code of pressed) { v += KEYS[code][0]; w += KEYS[code][1]; }
+    if (v !== 0 || w !== 0) {
+      socket.send(new Float32Array([Math.max(-1, Math.min(1, v)), Math.max(-1, Math.min(1, w))]));
+      driving = true;
+    } else if (driving) {
+      socket.send(new Float32Array([0, 0]));  // «отпустить»: управление возвращается программе
+      driving = false;
+    }
+  }, 50);
+})();
+</script>
+</body>
+</html>
