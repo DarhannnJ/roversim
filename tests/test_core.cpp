@@ -1142,8 +1142,12 @@ TEST(occupancy_grid_traces_rays_with_bresenham) {
     CHECK_NEAR(map.occupancy_value(map.cell_center(40, 20)), 1.0, 1e-6);
     CHECK_NEAR(map.occupancy_value(map.cell_center(30, 20)), -1.0, 1e-6);
 
-    // Стена «забывается»: когда лучи начинают проходить сквозь клетку, она освобождается.
+    // Стена «забывается», но не сразу. Клетка помнит свои попадания (их было 21), и
+    // первые наблюдения «свободно» лишь гасят их; когда память исчерпана, оценка
+    // занятости начинает снижаться, и клетка освобождается.
     const float through[2] = {3.0F, 10.0F};
+    for (int i = 0; i < 20; ++i) map.integrate_scan(sensor, dirs, through, 10.0);
+    CHECK(map.state(40, 20) == nav::CellState::Occupied);
     for (int i = 0; i < 20; ++i) map.integrate_scan(sensor, dirs, through, 10.0);
     CHECK(map.state(40, 20) == nav::CellState::Free);
 }
@@ -1575,6 +1579,65 @@ TEST(tracker_tells_moving_objects_from_new_static_ones) {
         CHECK(found[180] == 0);
         CHECK(map.state(cx, cy) == nav::CellState::Occupied);
     }
+}
+
+TEST(occupancy_grid_remembers_hits_against_misses) {
+    // Клетка, много раз наблюдавшаяся занятой, переживает столько же наблюдений
+    // «свободно» (так выглядят лучи, прошедшие «сквозь» стену из-за ошибки позы).
+    // Без памяти попаданий она стирается за десяток сканов. Забывание при этом
+    // остаётся: когда запомненные попадания исчерпаны, клетка освобождается.
+    const Pose2 sensor{0.012, 0.017, 0.0};
+    std::vector<Vec2> dirs(360);
+    for (int i = 0; i < 360; ++i) {
+        const double a = -kPi + i * kTwoPi / 360;
+        dirs[static_cast<std::size_t>(i)] = {std::cos(a), std::sin(a)};
+    }
+    const std::vector<float> open(360, 3.0F);
+    std::vector<float> blocked = open;
+    for (std::size_t i = 178; i <= 182; ++i) blocked[i] = 1.52F;  // предмет в 1.52 м прямо по курсу
+    for (const int memory : {0, 200}) {
+        nav::MapConfig config;
+        config.hit_memory = memory;
+        nav::OccupancyGrid map(config, Vec2{0.0, 0.0});
+        int cx = 0, cy = 0;
+        CHECK(map.cell_of(sensor.position() + Vec2{1.52, 0.0}, cx, cy));
+        for (int k = 0; k < 60; ++k) map.integrate_scan(sensor, dirs, blocked, 10.0);
+        CHECK(map.state(cx, cy) == nav::CellState::Occupied);
+        for (int k = 0; k < 40; ++k) map.integrate_scan(sensor, dirs, open, 10.0);
+        CHECK(map.state(cx, cy) == (memory > 0 ? nav::CellState::Occupied : nav::CellState::Free));
+        for (int k = 0; k < 40; ++k) map.integrate_scan(sensor, dirs, open, 10.0);
+        CHECK(map.state(cx, cy) == nav::CellState::Free);
+
+        // Объект, пробывший в клетке всего несколько сканов (так выглядит проезжающее
+        // препятствие), памяти не оставляет: запоминаются только попадания в уже
+        // уверенно занятую клетку. Его след стирается так же быстро, как без памяти.
+        nav::OccupancyGrid passing(config, Vec2{0.0, 0.0});
+        for (int k = 0; k < 5; ++k) passing.integrate_scan(sensor, dirs, blocked, 10.0);
+        CHECK(passing.state(cx, cy) == nav::CellState::Occupied);
+        for (int k = 0; k < 11; ++k) passing.integrate_scan(sensor, dirs, open, 10.0);
+        CHECK(passing.state(cx, cy) == nav::CellState::Free);
+    }
+}
+
+TEST(navigator_rejects_goal_outside_map) {
+    // Карта конечна; цель за её пределами — ошибка настройки, о которой нужно
+    // сообщить сразу, а не ждать маршрута, которого не будет.
+    const SimConfig config;
+    nav::ScanGeometry scan;
+    scan.num_rays = 360;
+    scan.angle_min = -kPi;
+    scan.angle_increment = kTwoPi / 360;
+    scan.range_max = 10.0;
+    nav::Navigator navigator(nav::navigator_config(config.robot, config.control_dt()), scan, Pose2{1.0, 2.0, 0.0});
+    navigator.set_goal({9.0, -6.0});  // в пределах карты 20 × 20 м с центром в точке старта
+    CHECK(navigator.status() == nav::NavStatus::Driving);
+    bool rejected = false;
+    try {
+        navigator.set_goal({12.5, 2.0});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    CHECK(rejected);
 }
 
 TEST(navigator_reaches_goals_in_unknown_maze) {

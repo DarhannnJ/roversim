@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace roversim::nav {
 
@@ -45,6 +46,13 @@ Navigator::Navigator(const NavigatorConfig& config, const ScanGeometry& scan, co
 }
 
 void Navigator::set_goal(Vec2 goal) {
+    // Карта имеет фиксированный размер с центром в точке старта. До цели за её
+    // пределами маршрут не построить никогда — лучше сообщить об этом сразу, чем
+    // бесконечно ждать «появления» пути.
+    int ix = 0, iy = 0;
+    if (!slam_.map().cell_of(goal, ix, iy)) {
+        throw std::invalid_argument("Navigator: the goal lies outside the SLAM map; increase slam.map.size_x / size_y");
+    }
     goal_ = goal;
     has_goal_ = true;
     status_ = NavStatus::Driving;
